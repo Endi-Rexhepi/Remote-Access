@@ -8,6 +8,11 @@ from pynput import mouse, keyboard
 import threading
 
 server_width, server_height = pyautogui.size()
+RESOLUTION_SIZE = struct.calcsize(">II")
+MIN_EVENT_SIZE = struct.calcsize('>II') + 1
+MAX_EVENT_SIZE = 64
+MAX_RESOLUTION = 16384
+ALLOWED_KEYS = {k.name : k for k in keyboard.Key}
 
 def screen_capture():
     img = ImageGrab.grab()
@@ -28,21 +33,15 @@ def screen_capture():
         print('Failure')
 
 def recieve_data(no_bytes):
-    d = conn.recv(no_bytes)
-    if not d:
-        print("The server has closed the connection")
-    while len(d) != no_bytes:
-        try:
-            a = conn.recv(no_bytes - len(d))
-            if not a:
-                print("The server has closed the connection")
-                break
-            d += a
-        except Exception as e:
-            print(f"The connection is closed: {e}")
-            conn.close()
-            break
+    d = b''
+    while len(d) < no_bytes:    
+        a = conn.recv(no_bytes - len(d))
+        if not a:
+            raise ConnectionError("The client has closed the connection")
+        d += a
     return d
+
+        
 
 def send_screen():
     while True:
@@ -63,18 +62,28 @@ def receive_mouse():
         try:
             mouse_bytes_no = recieve_data(4)
             mouse_no = struct.unpack('>I', mouse_bytes_no)[0]
+            if not (mouse_no >= MIN_EVENT_SIZE and mouse_no<=MAX_EVENT_SIZE): 
+                raise ValueError(f"Invalid mouse/keyboard length: {mouse_no}")
             mouse_bytes = recieve_data(mouse_no)
             event_type = struct.unpack('>I', mouse_bytes[:4])[0]
-        
+            if event_type not in (1,2,3,4):
+                raise ValueError(f"Invalid event type: {event_type}")
 
             if event_type == 1:
+                if mouse_no !=12:
+                    raise ValueError(f"Invalid mouse length: {mouse_no}")
                 event_type, x, y = struct.unpack('>Iii', mouse_bytes)
+                x = max(0, min(x, client_width - 1))
+                y = max(0, min(y, client_height - 1))
                 scaled_x = int(x*server_width/client_width)
                 scaled_y = int(y*server_height/client_height)
                 mouse_controller.position = (scaled_x, scaled_y)
             elif event_type == 2:
+                if mouse_no !=20:
+                    raise ValueError(f"Invalid mouse length: {mouse_no}")
                 event_type, x, y, button, pressed = struct.unpack('>Iiiii', mouse_bytes)
-
+                x = max(0, min(x, client_width - 1))
+                y = max(0, min(y, client_height - 1))
                 scaled_x = int(x*server_width/client_width)
                 scaled_y = int(y*server_height/client_height)
                 mouse_controller.position = (scaled_x, scaled_y)
@@ -84,28 +93,44 @@ def receive_mouse():
                     button = mouse.Button.right
                 elif button == 3:
                     button = mouse.Button.middle
-
+                else:
+                    raise ValueError(f"This button doesnt exist: {button}")
+                
                 if pressed == 1:
                     mouse_controller.press(button)
+                elif pressed == 0:
+                    mouse_controller.release(button)    
                 else:
-                    mouse_controller.release(button)         
+                    raise ValueError(f"This action doesnt exist: {pressed}")
             elif event_type == 3:
+                if mouse_no !=20:
+                    raise ValueError(f"Invalid mouse length: {mouse_no}")
                 event_type, x, y, dx, dy = struct.unpack('>Iiiii', mouse_bytes)
+                dx = max(-10, min(dx, 10))
+                dy = max(-10, min(dy, 10))
                 mouse_controller.scroll(dx,dy)
             elif event_type == 4:
                 event_type, pressed = struct.unpack('>II', mouse_bytes[:8]) 
                 key_bytes = mouse_bytes[8:]
                 key_string = key_bytes.decode('utf-8')
+                
                 if key_string.startswith('Key.'):
                     key_name = key_string[4:]
-                    key = getattr(keyboard.Key, key_name)
+                    if key_name not in ALLOWED_KEYS:
+                        raise ValueError(f"This key doesn't exist: {key_name}")
+                    key = ALLOWED_KEYS[key_name]
                 else:
+                    if len(key_string) != 1:
+                        raise ValueError(f"This key doesnt exist: {key_string}")
                     key = key_string
+
                 if pressed == 1:
                     keyboard_controller.press(key)
-                else:
+                elif pressed == 0:
                     keyboard_controller.release(key)
-        except Exception as e:
+                else:
+                    raise ValueError(f"This function doesn't exist: {pressed}")
+        except (ConnectionError, OSError, ValueError, struct.error) as e:
             print(f"The connection is closed: {e}")
             conn.close()
             break
@@ -127,21 +152,30 @@ with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
     conn, addr = s.accept()
     print("CLIENT CONNECTED:", addr)
 
-    resolution_length = recieve_data(4)
-    resolution_size = struct.unpack('>I', resolution_length)[0]
-    resolution_bytes = recieve_data(resolution_size)
-    client_width, client_height = struct.unpack('>II', resolution_bytes)
-    print("Client resolution:", client_width, client_height)
-    print("Server resolution:", server_width, server_height)
-    
-    print(f'The addres where the connection ocurred: {addr}')
+    try:
+        resolution_length = recieve_data(4)
+        resolution_size = struct.unpack('>I', resolution_length)[0]
+        if resolution_size != RESOLUTION_SIZE:
+            raise ValueError(f"Invalid resolution length: {resolution_size}")
+        resolution_bytes = recieve_data(resolution_size)
+        client_width, client_height = struct.unpack('>II', resolution_bytes)
+        if  not ((client_width>=1 and client_height>= 1) and (client_width<=MAX_RESOLUTION and client_height<=MAX_RESOLUTION)):
+            raise ValueError(f"Invalid resolution parameters: {client_width}, {client_height}")
+    except (ConnectionError, OSError, struct.error, ValueError) as e:
+        print(f"Handshake failed: {e}")
+        conn.close()
+    else:
+        print("Client resolution:", client_width, client_height)
+        print("Server resolution:", server_width, server_height)
+        
+        print(f'The addres where the connection ocurred: {addr}')
 
-    screen_thread = threading.Thread(target=send_screen)
-    mouse_thread = threading.Thread(target=receive_mouse)
+        screen_thread = threading.Thread(target=send_screen)
+        mouse_thread = threading.Thread(target=receive_mouse)
 
-    screen_thread.start()
-    mouse_thread.start()
+        screen_thread.start()
+        mouse_thread.start()
 
-    screen_thread.join()
-    mouse_thread.join()
+        screen_thread.join()
+        mouse_thread.join()
     

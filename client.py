@@ -12,22 +12,16 @@ s = socket.socket()
 port = 12345
 
 client_width, client_height = pyautogui.size()
+MAX_FRAME_SIZE = 10*1024*1024
+MIN_FRAME_SIZE = 100
 
 def recieve_data(no_bytes):
-    d = s.recv(no_bytes)
-    if not d:
-        print("The server has closed the connection")
-    while len(d) != no_bytes:
-        try:
-            a = s.recv(no_bytes - len(d))
-            if not a:
-                print("The server has closed the connection")
-                break
-            d += a
-        except Exception as e:
-            print(f"The connection is closed: {e}")
-            s.close()
-            break
+    d = b''
+    while len(d) < no_bytes:    
+        a = s.recv(no_bytes - len(d))
+        if not a:
+            raise ConnectionError("The client has closed the connection")
+        d += a
     return d
 
 events = Queue()
@@ -64,17 +58,23 @@ mouse_listener = mouse.Listener(
 mouse_listener.start()
 
 def on_press(key):
-    if hasattr(key, 'char'):    
-        key_bytes = key.char.encode('utf-8') 
-    else:
+    char = getattr(key, 'char', None)
+    if char is not None:    
+        key_bytes = char.encode('utf-8') 
+    elif isinstance(key, keyboard.Key):
         key_bytes = str(key).encode('utf-8')
+    else:
+        return
     events.put((4, key_bytes, 1))
 
 def on_release(key):
-    if hasattr(key, 'char'):    
-        key_bytes = key.char.encode('utf-8') 
-    else:
+    char = getattr(key, 'char', None)
+    if char is not None:    
+        key_bytes = char.encode('utf-8') 
+    elif isinstance(key, keyboard.Key):
         key_bytes = str(key).encode('utf-8')
+    else:
+        return
     events.put((4, key_bytes, 0))
 
 keyboard_listener = keyboard.Listener(
@@ -84,7 +84,7 @@ keyboard_listener = keyboard.Listener(
 
 keyboard_listener.start()
 
-s.connect(('192.168.100.181', port))
+s.connect(('172.20.10.10', port))
 
 resolution_bytes = struct.pack('>II', client_width, client_height)
 resolution_bytes_len = struct.pack('>I', len(resolution_bytes))
@@ -95,12 +95,13 @@ while True:
     try:
         nbytes = recieve_data(4)
         no_bytes = struct.unpack('>I', nbytes)[0]
-
+        if not (no_bytes>=MIN_FRAME_SIZE and no_bytes<=MAX_FRAME_SIZE):
+            raise ValueError(f"Invalid frame length: {no_bytes}")
         image_byte = recieve_data(no_bytes)
-
         image_jpg = np.frombuffer(image_byte, dtype=np.uint8)
-
         image = cv2.imdecode(image_jpg, cv2.IMREAD_COLOR)
+        if image is None:
+            raise ValueError("The frame is not a valid image")
 
         
         cv2.namedWindow('Server Display', cv2.WND_PROP_FULLSCREEN)
@@ -122,7 +123,8 @@ while True:
         if not events.empty():
             event = events.get()
             if event[0] == 2 or event[0] == 3:
-                event_bytes = struct.pack('>IIiii', event[0], event[1], event[2], event[3], event[4])
+                event_bytes = struct.pack('>Iiiii', event[0], event[1], event[2], event[3], event[4])
+                # IIiii
                 event_length = struct.pack('>I', len(event_bytes))
             elif event[0] == 4:
                 event_bytes = (struct.pack('>II', event[0], event[2]) + event[1])
@@ -130,7 +132,10 @@ while True:
             s.sendall(event_length)
             s.sendall(event_bytes)
             
-    except KeyboardInterrupt:
-        print("The connection is closed")
+    except (KeyboardInterrupt, ConnectionError, OSError, ValueError) as e:
+        print(f"Session ended: {e!r}")
         s.close()
+        mouse_listener.stop()
+        keyboard_listener.stop()
+        cv2.destroyAllWindows()
         break
