@@ -6,9 +6,12 @@ Remote Access
 
 How does it work?
 - It works using a client-server architecture
-- A socket using IPv4 and TCP is created which sends and receives bytes
+- A socket cmdkey /delete:git:https://github.comusing IPv4 and TCP is created which sends and receives bytes
 - The server(the device to be cpntrolled) sends the image to the client(the device which will control)
 - The client sends the mouse and keyboard actions using a listener for both and sending the avrions on the socket for the server to receive them and perform them.
+
+keep_awake.py:
+- A script to keep a laptop awake for a certain amount of time(15 days in our case), by moving the mouse cursor back and forth.
 
 
 
