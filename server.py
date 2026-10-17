@@ -6,6 +6,8 @@ import numpy as np
 import struct
 from pynput import mouse, keyboard
 import threading
+import time
+import ssl
 
 server_width, server_height = pyautogui.size()
 RESOLUTION_SIZE = struct.calcsize(">II")
@@ -13,6 +15,7 @@ MIN_EVENT_SIZE = struct.calcsize('>II') + 1
 MAX_EVENT_SIZE = 64
 MAX_RESOLUTION = 16384
 ALLOWED_KEYS = {k.name : k for k in keyboard.Key}
+HANDSHAKE_TIMEOUT = 5
 
 def screen_capture():
     img = ImageGrab.grab()
@@ -32,9 +35,14 @@ def screen_capture():
     else:
         print('Failure')
 
-def recieve_data(no_bytes):
+def recieve_data(no_bytes, deadline= None):
     d = b''
     while len(d) < no_bytes:    
+        if deadline is not None:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError("Handshake took too long")
+            conn.settimeout(remaining)
         a = conn.recv(no_bytes - len(d))
         if not a:
             raise ConnectionError("The client has closed the connection")
@@ -52,8 +60,14 @@ def send_screen():
 
             conn.sendall(nbytes)
             conn.sendall(jpg_bytes)
+
+            time.sleep(0.03)
         except Exception as e:
             print(f"The connection is closed: {e}")
+            try:    
+                conn.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
             conn.close()
             break
 
@@ -132,6 +146,10 @@ def receive_mouse():
                     raise ValueError(f"This function doesn't exist: {pressed}")
         except (ConnectionError, OSError, ValueError, struct.error) as e:
             print(f"The connection is closed: {e}")
+            try:
+                conn.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
             conn.close()
             break
 
@@ -147,35 +165,59 @@ keyboard_controller = keyboard.Controller()
 with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
     s.bind(('', PORT))
     s.listen()
+    s.settimeout(1.0) 
     print(f"Server listening on: {''}: {PORT}")
 
-    conn, addr = s.accept()
-    print("CLIENT CONNECTED:", addr)
+    context = ssl.SSLContext(protocol=ssl.PROTOCOL_TLS_SERVER)
+    context.load_cert_chain(certfile="server.crt", keyfile="server.key")
 
-    try:
-        resolution_length = recieve_data(4)
-        resolution_size = struct.unpack('>I', resolution_length)[0]
-        if resolution_size != RESOLUTION_SIZE:
-            raise ValueError(f"Invalid resolution length: {resolution_size}")
-        resolution_bytes = recieve_data(resolution_size)
-        client_width, client_height = struct.unpack('>II', resolution_bytes)
-        if  not ((client_width>=1 and client_height>= 1) and (client_width<=MAX_RESOLUTION and client_height<=MAX_RESOLUTION)):
-            raise ValueError(f"Invalid resolution parameters: {client_width}, {client_height}")
-    except (ConnectionError, OSError, struct.error, ValueError) as e:
-        print(f"Handshake failed: {e}")
-        conn.close()
-    else:
-        print("Client resolution:", client_width, client_height)
-        print("Server resolution:", server_width, server_height)
+    while True:
+        try:
+            conn, addr = s.accept()
+        except TimeoutError:
+            continue
+        except KeyboardInterrupt:
+            print("Server shut down by user.")
+            break
+        deadline = time.monotonic() + HANDSHAKE_TIMEOUT
+        print("CLIENT CONNECTED:", addr)
+
+        try:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError("Handshake took too long")
+            conn.settimeout(remaining)
+            conn = context.wrap_socket(conn, server_side=True)
+        except OSError as e:
+            print(f"TLS Handshake failed with {addr}: {e}")
+            conn.close()
+            continue
+
+        try:
+            resolution_length = recieve_data(4, deadline)
+            resolution_size = struct.unpack('>I', resolution_length)[0]
+            if resolution_size != RESOLUTION_SIZE:
+                raise ValueError(f"Invalid resolution length: {resolution_size}")
+            resolution_bytes = recieve_data(resolution_size, deadline)
+            client_width, client_height = struct.unpack('>II', resolution_bytes)
+            if  not ((client_width>=1 and client_height>= 1) and (client_width<=MAX_RESOLUTION and client_height<=MAX_RESOLUTION)):
+                raise ValueError(f"Invalid resolution parameters: {client_width}, {client_height}")
+        except (ConnectionError, OSError, struct.error, ValueError) as e:
+            print(f"Handshake failed: {e}")
+            conn.close()
+        else:
+            conn.settimeout(600)
+            print("Client resolution:", client_width, client_height)
+            print("Server resolution:", server_width, server_height)
+            
+            print(f'The addres where the connection ocurred: {addr}')
+
+            screen_thread = threading.Thread(target=send_screen)
+            mouse_thread = threading.Thread(target=receive_mouse)
+
+            screen_thread.start()
+            mouse_thread.start()
+
+            screen_thread.join()
+            mouse_thread.join()
         
-        print(f'The addres where the connection ocurred: {addr}')
-
-        screen_thread = threading.Thread(target=send_screen)
-        mouse_thread = threading.Thread(target=receive_mouse)
-
-        screen_thread.start()
-        mouse_thread.start()
-
-        screen_thread.join()
-        mouse_thread.join()
-    

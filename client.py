@@ -6,6 +6,8 @@ import cv2
 import numpy as np
 from pynput import mouse, keyboard
 from queue import Queue
+import ssl
+import sys
 
 s = socket.socket()
 
@@ -84,12 +86,26 @@ keyboard_listener = keyboard.Listener(
 
 keyboard_listener.start()
 
-s.connect(('172.20.10.10', port))
+s.settimeout(5.0)
+try:
+    context = ssl.SSLContext(protocol=ssl.PROTOCOL_TLS_CLIENT)
+    context.load_verify_locations(cafile="server.crt")
+    # context.check_hostname = False
+    s = context.wrap_socket(s, server_hostname = 'end')
+    s.connect(('172.20.10.10', port))
+    resolution_bytes = struct.pack('>II', client_width, client_height)
+    resolution_bytes_len = struct.pack('>I', len(resolution_bytes))
+    s.sendall(resolution_bytes_len)
+    s.sendall(resolution_bytes)
+    s.settimeout(10.0)
+except OSError as e:
+    print(f"Connection failed: {e}")
+    s.close()
+    keyboard_listener.stop()
+    mouse_listener.stop()
+    sys.exit(1)
 
-resolution_bytes = struct.pack('>II', client_width, client_height)
-resolution_bytes_len = struct.pack('>I', len(resolution_bytes))
-s.sendall(resolution_bytes_len)
-s.sendall(resolution_bytes)
+
 
 while True:
     try:
