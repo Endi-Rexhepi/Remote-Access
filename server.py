@@ -8,6 +8,10 @@ from pynput import mouse, keyboard
 import threading
 import time
 import ssl
+from pathlib import Path
+import sys
+from argon2 import PasswordHasher
+import argon2
 
 server_width, server_height = pyautogui.size()
 RESOLUTION_SIZE = struct.calcsize(">II")
@@ -16,6 +20,15 @@ MAX_EVENT_SIZE = 64
 MAX_RESOLUTION = 16384
 ALLOWED_KEYS = {k.name : k for k in keyboard.Key}
 HANDSHAKE_TIMEOUT = 5
+PASS_FILE = Path(__file__).parent / "server.pass"
+CERT_FILE = Path(__file__).parent / "server.crt"
+KEY_FILE = Path(__file__).parent / "server.key"
+MIN_PASSWORD_BYTES = 8
+MAX_PASSWORD_BYTES = 160
+STATUS_SUCCESS = 1
+STATUS_FAILURE = 0
+STATUS_BLOCKED = 2
+MAX_PASS_ATTEMPTS = 3
 
 def screen_capture():
     img = ImageGrab.grab()
@@ -161,6 +174,55 @@ PORT = 12345
 mouse_controller = mouse.Controller()
 keyboard_controller = keyboard.Controller()
 
+if PASS_FILE.is_file():
+    try:
+        ph = PasswordHasher()
+        hash_pass = PASS_FILE.read_text(encoding='utf-8')
+        hash_pass = hash_pass.strip()
+        dummy_pass = "hello12"
+        ph.verify(hash_pass, dummy_pass)
+    except argon2.exceptions.InvalidHashError as e:
+        print(f"The file is broken: {e}")
+        sys.exit(1)
+    except (OSError, ValueError) as e:
+        print(f"The file can’t be read: {e}")
+        sys.exit(1)
+    except argon2.exceptions.VerifyMismatchError:
+        pass
+    except argon2.exceptions.VerificationError as e:
+        print(f"The hash password is broken: {e}")
+        sys.exit(1)
+    else:
+        print("The dummy password matched the real password. Exit!")
+        sys.exit(1)
+else:
+    print("Please run the setup_password.py script in order to create a server.pass")
+    sys.exit(1)
+
+try:
+    context = ssl.SSLContext(protocol=ssl.PROTOCOL_TLS_SERVER)
+    context.load_cert_chain(certfile=CERT_FILE, keyfile=KEY_FILE)
+except ssl.SSLError as e:
+    print(f"The certificate/key couldn't be loaded or is/are invalid: {e}")
+    sys.exit(1)
+except FileNotFoundError as e:
+    cert_exists = CERT_FILE.is_file()
+    key_exists = KEY_FILE.is_file()
+    if not cert_exists and key_exists:
+        print(f"The certificate is not found: {CERT_FILE}. Please make sure to generate it before running the script")
+    elif not key_exists and cert_exists:
+        print(f"The private key is not found: {KEY_FILE}. Please make sure to generate it before running the script")
+    elif not cert_exists and not key_exists:
+        print(f"The private key and the certificate are not found: {CERT_FILE} , {KEY_FILE}. Please make sure to generate them before running the script")
+    else: 
+        print(f"Unexpected file error: {e}")
+    sys.exit(1)
+except PermissionError:
+    print(f"Check read permissions on {CERT_FILE} , {KEY_FILE}")
+    sys.exit(1)
+except OSError as e:
+    print(f"Something wrong with {CERT_FILE} , {KEY_FILE}: {e}")
+    sys.exit(1)
 
 with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
     s.bind(('', PORT))
@@ -168,9 +230,7 @@ with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
     s.settimeout(1.0) 
     print(f"Server listening on: {''}: {PORT}")
 
-    context = ssl.SSLContext(protocol=ssl.PROTOCOL_TLS_SERVER)
-    context.load_cert_chain(certfile="server.crt", keyfile="server.key")
-
+    failed_attempts = {}
     while True:
         try:
             conn, addr = s.accept()
@@ -190,6 +250,47 @@ with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
             conn = context.wrap_socket(conn, server_side=True)
         except OSError as e:
             print(f"TLS Handshake failed with {addr}: {e}")
+            conn.close()
+            continue
+
+        try:
+            password_length_bytes = recieve_data(4, deadline)
+            password_length = struct.unpack('>I', password_length_bytes)[0]
+            if password_length<MIN_PASSWORD_BYTES or password_length>MAX_PASSWORD_BYTES:
+                raise ValueError(f"Invalid password length: {password_length}")
+            client_password_bytes = recieve_data(password_length, deadline)
+            count = failed_attempts.get(addr[0], 0)
+            if count>= MAX_PASS_ATTEMPTS:
+                print(f"This blocked client:  {addr[0]}, tried to connect again ({count} failed attempts)")
+                password_status = struct.pack('>I', STATUS_BLOCKED)
+                try:    
+                    conn.sendall(password_status)
+                except OSError as e:
+                    print(f"The client has disconnected: {e}")
+                conn.close()
+                continue
+            ph.verify(hash_pass, client_password_bytes)
+            failed_attempts[addr[0]] = 0
+            print(f"The password is correct!")
+            password_status = struct.pack('>I', STATUS_SUCCESS)
+            conn.sendall(password_status)
+        except argon2.exceptions.VerifyMismatchError as e:
+            count = failed_attempts.get(addr[0], 0)
+            count = count + 1
+            failed_attempts[addr[0]] = count
+            print(f"The password is incorrect! Client on address: {addr[0]} entered an incorrect password {count} times!")
+            if count>=MAX_PASS_ATTEMPTS:
+                password_status = struct.pack('>I', STATUS_BLOCKED)
+            else:
+                password_status = struct.pack('>I', STATUS_FAILURE)
+            try:    
+                conn.sendall(password_status)
+            except OSError as e:
+                print(f"The client has disconnected: {e}")
+            conn.close()
+            continue
+        except (ConnectionError, OSError, struct.error, ValueError) as e:
+            print(f"Handshake failed: {e}")
             conn.close()
             continue
 

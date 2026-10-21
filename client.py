@@ -8,6 +8,8 @@ from pynput import mouse, keyboard
 from queue import Queue
 import ssl
 import sys
+import getpass
+from pathlib import Path
 
 s = socket.socket()
 
@@ -16,13 +18,18 @@ port = 12345
 client_width, client_height = pyautogui.size()
 MAX_FRAME_SIZE = 10*1024*1024
 MIN_FRAME_SIZE = 100
+CERT_FILE = Path(__file__).parent / "server.crt"
+STATUS_SUCCESS = 1
+STATUS_FAILURE = 0
+STATUS_BLOCKED = 2
+
 
 def recieve_data(no_bytes):
     d = b''
     while len(d) < no_bytes:    
         a = s.recv(no_bytes - len(d))
         if not a:
-            raise ConnectionError("The client has closed the connection")
+            raise ConnectionError("The server has closed the connection")
         d += a
     return d
 
@@ -57,7 +64,6 @@ mouse_listener = mouse.Listener(
     on_scroll=on_scroll
 )
 
-mouse_listener.start()
 
 def on_press(key):
     char = getattr(key, 'char', None)
@@ -84,15 +90,36 @@ keyboard_listener = keyboard.Listener(
     on_release = on_release
 )
 
-keyboard_listener.start()
-
 s.settimeout(5.0)
+password = getpass.getpass("Enter the password to connect with the server: ")
 try:
     context = ssl.SSLContext(protocol=ssl.PROTOCOL_TLS_CLIENT)
-    context.load_verify_locations(cafile="server.crt")
-    # context.check_hostname = False
+    context.load_verify_locations(cafile=CERT_FILE)
     s = context.wrap_socket(s, server_hostname = 'end')
+
+    encoded_password = password.encode('utf-8')
+    password_bytes_len = struct.pack('>I', len(encoded_password))
     s.connect(('172.20.10.10', port))
+    s.sendall(password_bytes_len)
+    s.sendall(encoded_password)
+    password_status_bytes = recieve_data(4)
+    password_status = struct.unpack('>I', password_status_bytes)[0]
+    if password_status == STATUS_SUCCESS:
+        print("The password is correct!")
+    elif password_status == STATUS_FAILURE:
+        print("The password is incorrect!")
+        s.close()
+        sys.exit(1)
+    elif password_status == STATUS_BLOCKED:
+        print("Too many failed attempts. You are blocked from this server.")
+        s.close()
+        sys.exit(1)
+    else:
+        print("Wrong password status!")
+        s.close()
+        sys.exit(1)
+    mouse_listener.start()
+    keyboard_listener.start()
     resolution_bytes = struct.pack('>II', client_width, client_height)
     resolution_bytes_len = struct.pack('>I', len(resolution_bytes))
     s.sendall(resolution_bytes_len)
