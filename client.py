@@ -46,8 +46,14 @@ def on_click(x, y, button, pressed):
         button_pressed = 1
     elif button == mouse.Button.right:
         button_pressed = 2
-    else:
+    elif button == mouse.Button.x1:
         button_pressed = 3
+    elif button == mouse.Button.x2:
+        button_pressed = 4
+    elif button == mouse.Button.middle:
+        button_pressed = 5
+    else:
+        return
 
     if pressed:
         pressed_int = 1
@@ -66,24 +72,23 @@ mouse_listener = mouse.Listener(
 
 
 def on_press(key):
-    char = getattr(key, 'char', None)
-    if char is not None:    
-        key_bytes = char.encode('utf-8') 
-    elif isinstance(key, keyboard.Key):
+    if isinstance(key, keyboard.Key):
         key_bytes = str(key).encode('utf-8')
+        events.put((4, key_bytes, 1))
+    elif key.vk is not None:
+        events.put((5, key.vk, 1))
     else:
         return
-    events.put((4, key_bytes, 1))
+    
 
 def on_release(key):
-    char = getattr(key, 'char', None)
-    if char is not None:    
-        key_bytes = char.encode('utf-8') 
-    elif isinstance(key, keyboard.Key):
+    if isinstance(key, keyboard.Key):
         key_bytes = str(key).encode('utf-8')
+        events.put((4, key_bytes, 0))
+    elif key.vk is not None:
+        events.put((5, key.vk, 0))
     else:
         return
-    events.put((4, key_bytes, 0))
 
 keyboard_listener = keyboard.Listener(
     on_press=on_press,
@@ -172,6 +177,9 @@ while True:
             elif event[0] == 4:
                 event_bytes = (struct.pack('>II', event[0], event[2]) + event[1])
                 event_length = struct.pack('>I', len(event_bytes)) 
+            elif event[0] == 5:
+                event_bytes = struct.pack('>III', event[0], event[2], event[1])
+                event_length = struct.pack('>I', len(event_bytes))
             s.sendall(event_length)
             s.sendall(event_bytes)
             

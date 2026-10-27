@@ -76,12 +76,11 @@ def send_screen():
 
             time.sleep(0.03)
         except Exception as e:
-            print(f"The connection is closed: {e}")
+            print(f"The connection is closed: {e!r}")
             try:    
                 conn.shutdown(socket.SHUT_RDWR)
             except OSError:
                 pass
-            conn.close()
             break
 
 def receive_mouse():
@@ -93,7 +92,7 @@ def receive_mouse():
                 raise ValueError(f"Invalid mouse/keyboard length: {mouse_no}")
             mouse_bytes = recieve_data(mouse_no)
             event_type = struct.unpack('>I', mouse_bytes[:4])[0]
-            if event_type not in (1,2,3,4):
+            if event_type not in (1,2,3,4,5):
                 raise ValueError(f"Invalid event type: {event_type}")
 
             if event_type == 1:
@@ -119,14 +118,20 @@ def receive_mouse():
                 elif button == 2:
                     button = mouse.Button.right
                 elif button == 3:
+                    button = mouse.Button.x1
+                elif button == 4:
+                    button = mouse.Button.x2
+                elif button == 5:
                     button = mouse.Button.middle
                 else:
                     raise ValueError(f"This button doesnt exist: {button}")
                 
                 if pressed == 1:
                     mouse_controller.press(button)
+                    held_mouse_buttons.add(button)
                 elif pressed == 0:
                     mouse_controller.release(button)    
+                    held_mouse_buttons.discard(button)
                 else:
                     raise ValueError(f"This action doesnt exist: {pressed}")
             elif event_type == 3:
@@ -147,23 +152,37 @@ def receive_mouse():
                         raise ValueError(f"This key doesn't exist: {key_name}")
                     key = ALLOWED_KEYS[key_name]
                 else:
-                    if len(key_string) != 1:
-                        raise ValueError(f"This key doesnt exist: {key_string}")
-                    key = key_string
-
+                    raise ValueError(f"This is not a special key: {key_string!r}")
+               
                 if pressed == 1:
                     keyboard_controller.press(key)
+                    held_keys.add(key)
                 elif pressed == 0:
                     keyboard_controller.release(key)
+                    held_keys.discard(key)
                 else:
                     raise ValueError(f"This function doesn't exist: {pressed}")
-        except (ConnectionError, OSError, ValueError, struct.error) as e:
-            print(f"The connection is closed: {e}")
+            elif event_type == 5: 
+                if mouse_no !=12:
+                    raise ValueError(f"Invalid keyboard length: {mouse_no}")
+                event_type, pressed, vk = struct.unpack(">III", mouse_bytes)
+                if vk<1 or vk> 254:
+                    raise ValueError(f"Invalid key code: {vk}")
+                key = keyboard.KeyCode.from_vk(vk)
+                if pressed == 1:
+                    keyboard_controller.press(key)
+                    held_keys.add(key)
+                elif pressed == 0:
+                    keyboard_controller.release(key)
+                    held_keys.discard(key)
+                else:
+                    raise ValueError(f"This function doesn't exist: {pressed}")
+        except Exception as e:
+            print(f"The connection is closed: {e!r}")
             try:
                 conn.shutdown(socket.SHUT_RDWR)
             except OSError:
                 pass
-            conn.close()
             break
 
 # def receive_keyboard():
@@ -313,12 +332,30 @@ with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
             
             print(f'The addres where the connection ocurred: {addr}')
 
+            held_keys = set()
+            held_mouse_buttons = set()
+
             screen_thread = threading.Thread(target=send_screen)
             mouse_thread = threading.Thread(target=receive_mouse)
 
             screen_thread.start()
             mouse_thread.start()
 
+            
             screen_thread.join()
             mouse_thread.join()
+            for held_key in held_keys:
+                try:
+                    keyboard_controller.release(held_key)
+                    print(f"Released stuck key: {held_key}")
+                except Exception as e:
+                    print(f"Failed to release {held_key}: {e!r}")
+
+            for held_mouse_button in held_mouse_buttons:
+                try:
+                    mouse_controller.release(held_mouse_button)
+                    print(f"Released stuck button: {held_mouse_button}")
+                except Exception as e:
+                    print(f"Failed to release {held_mouse_button}: {e!r}")
+            conn.close()
         
