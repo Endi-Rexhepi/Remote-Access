@@ -12,6 +12,7 @@ from pathlib import Path
 import sys
 from argon2 import PasswordHasher
 import argon2
+import logging
 
 server_width, server_height = pyautogui.size()
 RESOLUTION_SIZE = struct.calcsize(">II")
@@ -23,12 +24,14 @@ HANDSHAKE_TIMEOUT = 5
 PASS_FILE = Path(__file__).parent / "server.pass"
 CERT_FILE = Path(__file__).parent / "server.crt"
 KEY_FILE = Path(__file__).parent / "server.key"
+SERVER_LOG = Path(__file__).parent / "server.log"
 MIN_PASSWORD_BYTES = 8
 MAX_PASSWORD_BYTES = 160
 STATUS_SUCCESS = 1
 STATUS_FAILURE = 0
 STATUS_BLOCKED = 2
 MAX_PASS_ATTEMPTS = 3
+logging.basicConfig(handlers=[logging.FileHandler(SERVER_LOG, encoding="utf-8"), logging.StreamHandler()], format="%(asctime)s [%(levelname)s] %(message)s", level= logging.INFO, datefmt="%d/%m/%Y %H:%M:%S")
 
 def screen_capture():
     img = ImageGrab.grab()
@@ -46,7 +49,7 @@ def screen_capture():
         jpg_bytes = jpg.tobytes()
         return jpg_bytes, len(jpg_bytes)
     else:
-        print('Failure')
+        logging.error('Failure on capturing the screen')
 
 def recieve_data(no_bytes, deadline= None):
     d = b''
@@ -76,8 +79,11 @@ def send_screen():
 
             time.sleep(0.03)
         except Exception as e:
-            print(f"The connection is closed: {e!r}")
-            try:    
+            if isinstance(e, (ConnectionError, OSError)):
+                logging.info(f"Screen stream to {addr[0]} ended: {e!r}")
+            else:
+                logging.exception(f"Unexpected error in the screen thread ({addr[0]})")
+            try:
                 conn.shutdown(socket.SHUT_RDWR)
             except OSError:
                 pass
@@ -178,7 +184,12 @@ def receive_mouse():
                 else:
                     raise ValueError(f"This function doesn't exist: {pressed}")
         except Exception as e:
-            print(f"The connection is closed: {e!r}")
+            if isinstance(e, (ConnectionError, OSError)):
+                logging.info(f"Session with {addr[0]} ended: {e!r}")
+            elif isinstance(e, (ValueError, struct.error)):
+                logging.warning(f"Invalid input from {addr[0]}, ending the session: {e!r}")
+            else:
+                logging.exception(f"Unexpected error while handling input from {addr[0]}")
             try:
                 conn.shutdown(socket.SHUT_RDWR)
             except OSError:
@@ -201,53 +212,53 @@ if PASS_FILE.is_file():
         dummy_pass = "hello12"
         ph.verify(hash_pass, dummy_pass)
     except argon2.exceptions.InvalidHashError as e:
-        print(f"The file is broken: {e}")
+        logging.error(f"The file is broken: {e}")
         sys.exit(1)
     except (OSError, ValueError) as e:
-        print(f"The file can’t be read: {e}")
+        logging.error(f"The file can’t be read: {e}")
         sys.exit(1)
     except argon2.exceptions.VerifyMismatchError:
         pass
     except argon2.exceptions.VerificationError as e:
-        print(f"The hash password is broken: {e}")
+        logging.error(f"The hash password is broken: {e}")
         sys.exit(1)
     else:
-        print("The dummy password matched the real password. Exit!")
+        logging.error("The dummy password matched the real password. Exit!")
         sys.exit(1)
 else:
-    print("Please run the setup_password.py script in order to create a server.pass")
+    logging.error("Please run the setup_password.py script in order to create a server.pass")
     sys.exit(1)
 
 try:
     context = ssl.SSLContext(protocol=ssl.PROTOCOL_TLS_SERVER)
     context.load_cert_chain(certfile=CERT_FILE, keyfile=KEY_FILE)
 except ssl.SSLError as e:
-    print(f"The certificate/key couldn't be loaded or is/are invalid: {e}")
+    logging.error(f"The certificate/key couldn't be loaded or is/are invalid: {e}")
     sys.exit(1)
 except FileNotFoundError as e:
     cert_exists = CERT_FILE.is_file()
     key_exists = KEY_FILE.is_file()
     if not cert_exists and key_exists:
-        print(f"The certificate is not found: {CERT_FILE}. Please make sure to generate it before running the script")
+        logging.error(f"The certificate is not found: {CERT_FILE}. Please make sure to generate it before running the script")
     elif not key_exists and cert_exists:
-        print(f"The private key is not found: {KEY_FILE}. Please make sure to generate it before running the script")
+        logging.error(f"The private key is not found: {KEY_FILE}. Please make sure to generate it before running the script")
     elif not cert_exists and not key_exists:
-        print(f"The private key and the certificate are not found: {CERT_FILE} , {KEY_FILE}. Please make sure to generate them before running the script")
+        logging.error(f"The private key and the certificate are not found: {CERT_FILE} , {KEY_FILE}. Please make sure to generate them before running the script")
     else: 
-        print(f"Unexpected file error: {e}")
+        logging.error(f"Unexpected file error: {e}")
     sys.exit(1)
 except PermissionError:
-    print(f"Check read permissions on {CERT_FILE} , {KEY_FILE}")
+    logging.error(f"Check read permissions on {CERT_FILE} , {KEY_FILE}")
     sys.exit(1)
 except OSError as e:
-    print(f"Something wrong with {CERT_FILE} , {KEY_FILE}: {e}")
+    logging.error(f"Something wrong with {CERT_FILE} , {KEY_FILE}: {e}")
     sys.exit(1)
 
 with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
     s.bind(('', PORT))
     s.listen()
     s.settimeout(1.0) 
-    print(f"Server listening on: {''}: {PORT}")
+    logging.info(f"Server listening on: {''}: {PORT}")
 
     failed_attempts = {}
     while True:
@@ -256,10 +267,10 @@ with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         except TimeoutError:
             continue
         except KeyboardInterrupt:
-            print("Server shut down by user.")
+            logging.info("Server shut down by user.")
             break
         deadline = time.monotonic() + HANDSHAKE_TIMEOUT
-        print("CLIENT CONNECTED:", addr)
+        logging.info(f"CLIENT CONNECTED: {addr}")
 
         try:
             remaining = deadline - time.monotonic()
@@ -268,7 +279,7 @@ with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
             conn.settimeout(remaining)
             conn = context.wrap_socket(conn, server_side=True)
         except OSError as e:
-            print(f"TLS Handshake failed with {addr}: {e}")
+            logging.warning(f"TLS Handshake failed with {addr}: {e}")
             conn.close()
             continue
 
@@ -280,24 +291,24 @@ with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
             client_password_bytes = recieve_data(password_length, deadline)
             count = failed_attempts.get(addr[0], 0)
             if count>= MAX_PASS_ATTEMPTS:
-                print(f"This blocked client:  {addr[0]}, tried to connect again ({count} failed attempts)")
+                logging.warning(f"This blocked client:  {addr[0]}, tried to connect again ({count} failed attempts)")
                 password_status = struct.pack('>I', STATUS_BLOCKED)
                 try:    
                     conn.sendall(password_status)
                 except OSError as e:
-                    print(f"The client has disconnected: {e}")
+                    logging.error(f"The client has disconnected: {e}")
                 conn.close()
                 continue
             ph.verify(hash_pass, client_password_bytes)
             failed_attempts[addr[0]] = 0
-            print(f"The password is correct!")
+            logging.info(f"The password is correct, {addr}!")
             password_status = struct.pack('>I', STATUS_SUCCESS)
             conn.sendall(password_status)
         except argon2.exceptions.VerifyMismatchError as e:
             count = failed_attempts.get(addr[0], 0)
             count = count + 1
             failed_attempts[addr[0]] = count
-            print(f"The password is incorrect! Client on address: {addr[0]} entered an incorrect password {count} times!")
+            logging.warning(f"The password is incorrect! Client on address: {addr[0]} entered an incorrect password {count} times!")
             if count>=MAX_PASS_ATTEMPTS:
                 password_status = struct.pack('>I', STATUS_BLOCKED)
             else:
@@ -305,11 +316,11 @@ with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
             try:    
                 conn.sendall(password_status)
             except OSError as e:
-                print(f"The client has disconnected: {e}")
+                logging.warning(f"The client has disconnected: {e}")
             conn.close()
             continue
         except (ConnectionError, OSError, struct.error, ValueError) as e:
-            print(f"Handshake failed: {e}")
+            logging.warning(f"Handshake failed: {e}, {addr}")
             conn.close()
             continue
 
@@ -323,14 +334,14 @@ with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
             if  not ((client_width>=1 and client_height>= 1) and (client_width<=MAX_RESOLUTION and client_height<=MAX_RESOLUTION)):
                 raise ValueError(f"Invalid resolution parameters: {client_width}, {client_height}")
         except (ConnectionError, OSError, struct.error, ValueError) as e:
-            print(f"Handshake failed: {e}")
+            logging.warning(f"Handshake failed: {e}, {addr}")
             conn.close()
         else:
             conn.settimeout(600)
-            print("Client resolution:", client_width, client_height)
-            print("Server resolution:", server_width, server_height)
+            logging.info(f"Client resolution: {client_width}, {client_height}")
+            logging.info(f"Server resolution: {server_width}, {server_height}")
             
-            print(f'The addres where the connection ocurred: {addr}')
+            logging.info(f'The addres where the connection ocurred: {addr}')
 
             held_keys = set()
             held_mouse_buttons = set()
@@ -340,22 +351,22 @@ with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
 
             screen_thread.start()
             mouse_thread.start()
-
             
             screen_thread.join()
             mouse_thread.join()
+            
             for held_key in held_keys:
                 try:
                     keyboard_controller.release(held_key)
-                    print(f"Released stuck key: {held_key}")
+                    logging.info(f"Released stuck key: {held_key}")
                 except Exception as e:
-                    print(f"Failed to release {held_key}: {e!r}")
+                    logging.error(f"Failed to release {held_key}: {e!r}")
 
             for held_mouse_button in held_mouse_buttons:
                 try:
                     mouse_controller.release(held_mouse_button)
-                    print(f"Released stuck button: {held_mouse_button}")
+                    logging.info(f"Released stuck button: {held_mouse_button}")
                 except Exception as e:
-                    print(f"Failed to release {held_mouse_button}: {e!r}")
+                    logging.error(f"Failed to release {held_mouse_button}: {e!r}")
             conn.close()
         
