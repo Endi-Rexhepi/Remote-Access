@@ -1,0 +1,6 @@
+pillow
+pyautogui
+opencv-python
+numpy
+pynput
+argon2-cffi
