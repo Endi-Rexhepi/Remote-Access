@@ -81,37 +81,67 @@ def kill_switch():
 
 def window_consent(ip):
     answer = False
-    
+
     def consent_allow():
-        nonlocal answer 
+        nonlocal answer
         answer = True
         consent_window.destroy()
 
-    def consent_deny(): 
+    def consent_deny():
         nonlocal answer
         answer = False
         consent_window.destroy()
-    
-    consent_window = Tk()  
-    consent_window.title("Server Window")  
-    consent_window.geometry("250x150")  
+
+    consent_window = Tk()
+    consent_window.title("Server Window")
+    consent_window.configure(bg="#b00020")
     consent_window.after(CONSENT_TIMEOUT * 1000, consent_deny)
     consent_window.protocol("WM_DELETE_WINDOW", consent_deny)
     consent_window.attributes("-topmost", True)
 
-    label = Label(consent_window, text = f"Allow remote control from {ip}?")
+    frame = Frame(consent_window, bg="#b00020", padx=16, pady=12)
+    frame.pack(fill="both", expand=True)
 
-    button1 = Button(consent_window, text = "Allow", command=consent_allow)
-    button2 = Button(consent_window, text = "Deny", command=consent_deny)
-    label.pack()
+    label = Label(frame, text=f"Allow remote control from {ip}?", bg="#b00020", fg="white", font=("Times New Roman", 12, "bold"))
+    label.pack(side="top", pady=(0, 10))
 
-    button1.place(x =40, y = 50)
-    button2.place(x = 140, y = 50)
+    buttons = Frame(frame, bg="#b00020")
+    buttons.pack(side="top")
+
+    allow_button = Button(buttons, text="Allow", width=10, command=consent_allow)
+    deny_button = Button(buttons, text="Deny", width=10, command=consent_deny)
+    allow_button.pack(side="left", padx=6)
+    deny_button.pack(side="left", padx=6)
 
     consent_window.mainloop()
 
     return answer
-        
+
+def show_indicator(ip, screen_thread, mouse_thread):
+    indicator = Tk()       
+    indicator.attributes("-topmost", True)
+    indicator.attributes("-toolwindow", True)   
+    indicator.protocol("WM_DELETE_WINDOW", lambda: None) 
+    indicator.title("Remote session active")
+
+    frame = Frame(indicator, bg="#b00020", padx=14, pady=10)
+    frame.pack(fill="both", expand=True)
+
+    label = Label(frame, text=f"{ip} is controlling this PC.\nPress Ctrl+Alt+Q or click the button to stop.", bg="#b00020", fg="white", font=("Times New Roman", 11, "bold"), justify="left")
+    label.pack(anchor="w")
+
+    stop_button = Button(frame, text="Stop Remote Access", command=kill_switch)
+    stop_button.pack(anchor="e", pady=(8, 0))
+
+    def check_session():
+        if screen_thread.is_alive() or mouse_thread.is_alive():
+            indicator.after(200, check_session)
+        else:
+            indicator.destroy()
+
+    indicator.after(200, check_session)
+
+    indicator.mainloop()
 
 def send_screen():
     while True:
@@ -415,6 +445,8 @@ with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
 
             screen_thread.start()
             mouse_thread.start()
+
+            show_indicator()
             
             screen_thread.join()
             mouse_thread.join()
