@@ -22,6 +22,7 @@ CERT_FILE = Path(__file__).parent / "server.crt"
 STATUS_SUCCESS = 1
 STATUS_FAILURE = 0
 STATUS_BLOCKED = 2
+STATUS_DENIED = 3
 
 
 def recieve_data(no_bytes):
@@ -107,6 +108,7 @@ try:
     s.connect(('172.20.10.10', port))
     s.sendall(password_bytes_len)
     s.sendall(encoded_password)
+    s.settimeout(40)
     password_status_bytes = recieve_data(4)
     password_status = struct.unpack('>I', password_status_bytes)[0]
     if password_status == STATUS_SUCCESS:
@@ -117,6 +119,10 @@ try:
         sys.exit(1)
     elif password_status == STATUS_BLOCKED:
         print("Too many failed attempts. You are blocked from this server.")
+        s.close()
+        sys.exit(1)
+    elif password_status == STATUS_DENIED:
+        print("The person at the remote PC denied the connection.")
         s.close()
         sys.exit(1)
     else:

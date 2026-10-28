@@ -13,6 +13,7 @@ import sys
 from argon2 import PasswordHasher
 import argon2
 import logging
+from tkinter import *
 
 server_width, server_height = pyautogui.size()
 RESOLUTION_SIZE = struct.calcsize(">II")
@@ -30,7 +31,11 @@ MAX_PASSWORD_BYTES = 160
 STATUS_SUCCESS = 1
 STATUS_FAILURE = 0
 STATUS_BLOCKED = 2
+STATUS_DENIED = 3
 MAX_PASS_ATTEMPTS = 3
+REQUIRE_CONSENT = True
+CONSENT_TIMEOUT = 30
+
 logging.basicConfig(handlers=[logging.FileHandler(SERVER_LOG, encoding="utf-8"), logging.StreamHandler()], format="%(asctime)s [%(levelname)s] %(message)s", level= logging.INFO, datefmt="%d/%m/%Y %H:%M:%S")
 
 def screen_capture():
@@ -65,6 +70,47 @@ def recieve_data(no_bytes, deadline= None):
         d += a
     return d
 
+def kill_switch():
+    logging.warning("Kill switch is pressed, closing the server.")
+    catch_hotkey.set()
+    if conn is not None:
+        try:
+            conn.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
+
+def window_consent(ip):
+    answer = False
+    
+    def consent_allow():
+        nonlocal answer 
+        answer = True
+        consent_window.destroy()
+
+    def consent_deny(): 
+        nonlocal answer
+        answer = False
+        consent_window.destroy()
+    
+    consent_window = Tk()  
+    consent_window.title("Server Window")  
+    consent_window.geometry("250x150")  
+    consent_window.after(CONSENT_TIMEOUT * 1000, consent_deny)
+    consent_window.protocol("WM_DELETE_WINDOW", consent_deny)
+    consent_window.attributes("-topmost", True)
+
+    label = Label(consent_window, text = f"Allow remote control from {ip}?")
+
+    button1 = Button(consent_window, text = "Allow", command=consent_allow)
+    button2 = Button(consent_window, text = "Deny", command=consent_deny)
+    label.pack()
+
+    button1.place(x =40, y = 50)
+    button2.place(x = 140, y = 50)
+
+    consent_window.mainloop()
+
+    return answer
         
 
 def send_screen():
@@ -261,7 +307,15 @@ with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
     logging.info(f"Server listening on: {''}: {PORT}")
 
     failed_attempts = {}
+    
+    conn = None
+    catch_hotkey = threading.Event()
+    hotkey = keyboard.GlobalHotKeys({'<ctrl>+<alt>+q': kill_switch})
+    hotkey.start()
+    
     while True:
+        if catch_hotkey.is_set():  
+            break
         try:
             conn, addr = s.accept()
         except TimeoutError:
@@ -296,12 +350,22 @@ with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
                 try:    
                     conn.sendall(password_status)
                 except OSError as e:
-                    logging.error(f"The client has disconnected: {e}")
+                    logging.warning(f"The client has disconnected: {e}")
                 conn.close()
                 continue
             ph.verify(hash_pass, client_password_bytes)
             failed_attempts[addr[0]] = 0
-            logging.info(f"The password is correct, {addr}!")
+            logging.info(f"The password is correct for  {addr}!")
+            if REQUIRE_CONSENT:    
+                answer = window_consent(addr[0])
+                if answer:
+                    deadline = time.monotonic() + HANDSHAKE_TIMEOUT
+                else:
+                    logging.warning(f"The server denied the connection with {addr[0]}")
+                    password_status = struct.pack('>I', STATUS_DENIED)
+                    conn.sendall(password_status)
+                    conn.close()
+                    continue
             password_status = struct.pack('>I', STATUS_SUCCESS)
             conn.sendall(password_status)
         except argon2.exceptions.VerifyMismatchError as e:
@@ -341,7 +405,7 @@ with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
             logging.info(f"Client resolution: {client_width}, {client_height}")
             logging.info(f"Server resolution: {server_width}, {server_height}")
             
-            logging.info(f'The addres where the connection ocurred: {addr}')
+            logging.info(f'Session started with: {addr}')
 
             held_keys = set()
             held_mouse_buttons = set()
@@ -369,4 +433,7 @@ with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
                 except Exception as e:
                     logging.error(f"Failed to release {held_mouse_button}: {e!r}")
             conn.close()
+    hotkey.stop()
+    logging.info("Server stopped")
+
         
