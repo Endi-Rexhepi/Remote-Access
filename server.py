@@ -35,6 +35,9 @@ STATUS_DENIED = 3
 MAX_PASS_ATTEMPTS = 3
 REQUIRE_CONSENT = True
 CONSENT_TIMEOUT = 30
+FRAME_SCALE = 0.75      
+JPEG_QUALITY = 70        
+FRAME_INTERVAL = 0.03
 
 logging.basicConfig(handlers=[logging.FileHandler(SERVER_LOG, encoding="utf-8"), logging.StreamHandler()], format="%(asctime)s [%(levelname)s] %(message)s", level= logging.INFO, datefmt="%d/%m/%Y %H:%M:%S")
 
@@ -44,17 +47,20 @@ def screen_capture():
     mouse_pos =  pyautogui.position()
     ax = mouse_pos[0]
     ay = mouse_pos[1]
-    bx = mouse_pos[0] + 10
-    by = mouse_pos[1] + 10
+    bx = mouse_pos[0] + 20
+    by = mouse_pos[1] + 20
     draw.ellipse((ax,ay,bx,by))
     img_np = np.array(img)
     img_np = cv2.cvtColor(img_np, cv2.COLOR_RGB2BGR)
-    success, jpg = cv2.imencode('.jpg', img_np)
+    if FRAME_SCALE != 1.0:
+        img_np = cv2.resize(img_np, None, fx=FRAME_SCALE, fy=FRAME_SCALE, interpolation=cv2.INTER_AREA)
+    success, jpg = cv2.imencode('.jpg', img_np, [cv2.IMWRITE_JPEG_QUALITY, JPEG_QUALITY])
     if success:
         jpg_bytes = jpg.tobytes()
         return jpg_bytes, len(jpg_bytes)
     else:
         logging.error('Failure on capturing the screen')
+        raise RuntimeError("JPEG encoding failed")
 
 def recieve_data(no_bytes, deadline= None):
     d = b''
@@ -153,7 +159,7 @@ def send_screen():
             conn.sendall(nbytes)
             conn.sendall(jpg_bytes)
 
-            time.sleep(0.03)
+            time.sleep(FRAME_INTERVAL)
         except Exception as e:
             if isinstance(e, (ConnectionError, OSError)):
                 logging.info(f"Screen stream to {addr[0]} ended: {e!r}")
@@ -431,7 +437,7 @@ with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
             logging.warning(f"Handshake failed: {e}, {addr}")
             conn.close()
         else:
-            conn.settimeout(600)
+            conn.settimeout(None)
             logging.info(f"Client resolution: {client_width}, {client_height}")
             logging.info(f"Server resolution: {server_width}, {server_height}")
             
@@ -446,7 +452,7 @@ with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
             screen_thread.start()
             mouse_thread.start()
 
-            show_indicator()
+            show_indicator(addr[0], screen_thread, mouse_thread)
             
             screen_thread.join()
             mouse_thread.join()

@@ -13,8 +13,6 @@ from pathlib import Path
 
 s = socket.socket()
 
-port = 12345
-
 client_width, client_height = pyautogui.size()
 MAX_FRAME_SIZE = 10*1024*1024
 MIN_FRAME_SIZE = 100
@@ -23,6 +21,10 @@ STATUS_SUCCESS = 1
 STATUS_FAILURE = 0
 STATUS_BLOCKED = 2
 STATUS_DENIED = 3
+SERVER_IP = '172.20.10.10'
+PORT = 12345
+# SERVER_HOSTNAME Must match the Common Name (CN) used when generating server.crt
+SERVER_HOSTNAME = 'end'
 
 
 def recieve_data(no_bytes):
@@ -101,11 +103,11 @@ password = getpass.getpass("Enter the password to connect with the server: ")
 try:
     context = ssl.SSLContext(protocol=ssl.PROTOCOL_TLS_CLIENT)
     context.load_verify_locations(cafile=CERT_FILE)
-    s = context.wrap_socket(s, server_hostname = 'end')
+    s = context.wrap_socket(s, server_hostname = SERVER_HOSTNAME)
 
     encoded_password = password.encode('utf-8')
     password_bytes_len = struct.pack('>I', len(encoded_password))
-    s.connect(('172.20.10.10', port))
+    s.connect((SERVER_IP, PORT))
     s.sendall(password_bytes_len)
     s.sendall(encoded_password)
     s.settimeout(40)
